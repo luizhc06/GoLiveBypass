@@ -132,15 +132,36 @@ jobs:
         working-directory: golive-gui
         run: |
           case "$RUNNER_OS" in
-            Linux)   EXE=$(find dist-app/linux-unpacked -maxdepth 1 -type f -perm -u+x ! -name '*.so*' ! -name 'chrome*' | head -1); xvfb-run -a node scripts/smoke-gui.mjs "$EXE" --json smoke.json ;;
-            Windows) node scripts/smoke-gui.mjs "dist-app/win-unpacked/GoLiveBypass.exe" --json smoke.json ;;
-            macOS)   node scripts/smoke-gui.mjs "$(ls -d dist-app/mac*/GoLiveBypass.app)/Contents/MacOS/GoLiveBypass" --json smoke.json ;;
+            Linux)   EXE=$(find dist-app/linux-unpacked -maxdepth 1 -type f -perm -u+x ! -name '*.so*' ! -name 'chrome*' | head -1); xvfb-run -a node scripts/smoke-gui.mjs "$EXE" --janela-na-frente --json smoke.json ;;
+            Windows) node scripts/smoke-gui.mjs "dist-app/win-unpacked/GoLiveBypass.exe" --janela-na-frente --json smoke.json ;;
+            macOS)   node scripts/smoke-gui.mjs "$(ls -d dist-app/mac*/GoLiveBypass.app)/Contents/MacOS/GoLiveBypass" --janela-na-frente --json smoke.json ;;
           esac
+      - name: Fumaça com a busca de updates presa (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: golive-gui
+        run: |
+          # Servidor que aceita a conexão e nunca responde: a busca de releases da inicialização
+          # (https.request para api.github.com) fica presa, como numa rede ruim. Só neste passo.
+          $srv = Start-Process node -ArgumentList '-e', "require('net').createServer(()=>{}).listen(443,'127.0.0.1')" -PassThru -WindowStyle Hidden
+          $hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
+          Copy-Item $hosts "$env:RUNNER_TEMP\hosts.bak"
+          Add-Content $hosts "`n127.0.0.1 api.github.com"
+          ipconfig /flushdns | Out-Null
+          try {
+            node scripts/smoke-gui.mjs "dist-app/win-unpacked/GoLiveBypass.exe" --busca-presa --json smoke-busca.json
+            $codigo = $LASTEXITCODE
+          } finally {
+            Copy-Item "$env:RUNNER_TEMP\hosts.bak" $hosts -Force
+            ipconfig /flushdns | Out-Null
+            Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
+          }
+          exit $codigo
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: fumaca-${{ matrix.os }}
-          path: golive-gui/smoke.json
+          path: golive-gui/smoke*.json
       - uses: actions/upload-artifact@v4
         with:
           name: app-${{ matrix.os }}
