@@ -45,6 +45,10 @@ jobs:
       - name: Tipos da interface (tsc)
         working-directory: golive-gui
         run: npx tsc --noEmit
+      - name: Tipos do processo principal (typecheck:electron)
+        if: matrix.lado == 'pr'
+        working-directory: golive-gui
+        run: npm run typecheck:electron
       - name: Cópia do bypass em dia
         working-directory: golive-gui
         run: npm run check-bypass
