@@ -1,0 +1,153 @@
+name: PR 355 em Linux, Windows e macOS
+
+# Workflow de conferência do bezumiya/GoLiveBypass#355, só no fork (branch ci/pr355-matriz = PR + este arquivo).
+# Não entra na PR: roda a suíte no código da PR e na beta-9 pura para comparar as falhas,
+# faz o build oficial (electron-builder, sem publicar) e o teste de fumaça no app empacotado.
+
+on:
+  push:
+    branches: [ci/pr355-matriz]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Base da PR: release/2.0.10-beta-9 (tag v2.0.10-beta-9). O lado "pr" é o próprio commit desta branch.
+  BASE_SHA: 647614d1b02e3e0e542a6b5874562ceec5ca47ff
+
+jobs:
+  suite:
+    name: suíte ${{ matrix.os }} (${{ matrix.lado }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        lado: [pr, base]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.lado == 'pr' && github.sha || env.BASE_SHA }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: golive-gui/package-lock.json
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/proton-confgen/go.mod
+          cache-dependency-path: tools/proton-confgen/go.sum
+      - name: Dependências
+        working-directory: golive-gui
+        run: npm ci --no-audit --no-fund
+      - name: Tipos da interface (tsc)
+        working-directory: golive-gui
+        run: npx tsc --noEmit
+      - name: Cópia do bypass em dia
+        working-directory: golive-gui
+        run: npm run check-bypass
+      - name: Suíte (vitest)
+        working-directory: golive-gui
+        continue-on-error: true
+        run: npx vitest run --reporter=default --reporter=json --outputFile=vitest-${{ matrix.lado }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vitest-${{ matrix.os }}-${{ matrix.lado }}
+          path: golive-gui/vitest-${{ matrix.lado }}.json
+
+  comparar:
+    name: falhas PR x base ${{ matrix.os }}
+    needs: suite
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vitest-${{ matrix.os }}-*
+          merge-multiple: true
+      - name: Comparar listas de falhas
+        shell: python
+        run: |
+          import json, sys
+          def ler(p):
+              d = json.load(open(p, encoding="utf-8"))
+              falhas = {r["fullName"] for t in d["testResults"] for r in t["assertionResults"] if r["status"] == "failed"}
+              return falhas, d["numPassedTests"], d["numTotalTests"]
+          pr, pp, pt = ler("vitest-pr.json")
+          base, bp, bt = ler("vitest-base.json")
+          print(f"PR:   {pp} passam / {len(pr)} falham ({pt})")
+          print(f"base: {bp} passam / {len(base)} falham ({bt})")
+          novas = sorted(pr - base)
+          print("falhas novas na PR:", novas or "nenhuma")
+          print("falhas da base que a PR não tem:", sorted(base - pr) or "nenhuma")
+          print("falhas comuns:", *sorted(pr & base), sep="\n  ")
+          sys.exit(1 if novas else 0)
+
+  build-e-fumaca:
+    name: build oficial e fumaça ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: golive-gui/package-lock.json
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tools/proton-confgen/go.mod
+          cache-dependency-path: tools/proton-confgen/go.sum
+      - name: Pacotes do Linux (AppImage e tela virtual)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3 xvfb libgbm1 libnss3 libasound2t64
+      - name: Dependências
+        working-directory: golive-gui
+        run: npm ci --no-audit --no-fund
+      - name: Compilar (sync, helpers Go, tsc, vite)
+        working-directory: golive-gui
+        run: npm run compile
+      - name: Empacotar como na release (sem publicar)
+        working-directory: golive-gui
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish never
+      - name: Artefatos gerados
+        working-directory: golive-gui
+        shell: bash
+        run: ls -la dist-app
+      - name: Teste de fumaça no app empacotado
+        shell: bash
+        working-directory: golive-gui
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   EXE=$(find dist-app/linux-unpacked -maxdepth 1 -type f -perm -u+x ! -name '*.so*' ! -name 'chrome*' | head -1); xvfb-run -a node scripts/smoke-gui.mjs "$EXE" --json smoke.json ;;
+            Windows) node scripts/smoke-gui.mjs "dist-app/win-unpacked/GoLiveBypass.exe" --json smoke.json ;;
+            macOS)   node scripts/smoke-gui.mjs "$(ls -d dist-app/mac*/GoLiveBypass.app)/Contents/MacOS/GoLiveBypass" --json smoke.json ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fumaca-${{ matrix.os }}
+          path: golive-gui/smoke.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.os }}
+          path: |
+            golive-gui/dist-app/*.AppImage
+            golive-gui/dist-app/*.exe
+            golive-gui/dist-app/*.dmg
+            golive-gui/dist-app/*.zip
+          if-no-files-found: warn
+          retention-days: 7
